@@ -1,5 +1,5 @@
-<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>[hidden]{display:none!important}</style></head><body>
-	<title>Nộp Báo Cáo Thực Hành</title>
+<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0}[hidden]{display:none!important}</style></head><body>
+<title>Nộp Báo Cáo Thực Hành</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -242,14 +242,14 @@ details summary{cursor:pointer;font-weight:600}
 /* ================== CẤU HÌNH — thầy chỉnh ở đây ================== */
 const CONFIG = {
   // Dán đối tượng firebaseConfig (Firebase Console → Project settings → Your apps → Web app). Để null = chế độ thử.
-firebase: {  
-	apiKey: "AIzaSyCM-BoYqk1qdYc_7fTt84MuEDLynhcsubM",
-  	authDomain: "nop-bao-cao.firebaseapp.com",
-  	projectId: "nop-bao-cao",
-  	storageBucket: "nop-bao-cao.firebasestorage.app",
-  	messagingSenderId: "290636152534",
- 	appId: "1:290636152534:web:025db693275608522e1377",
-},
+  firebase: {
+    apiKey: "AIzaSyCM-BoYqk1qdYc_7fTt84MuEDLynhcsubM",
+    authDomain: "nop-bao-cao.firebaseapp.com",
+    projectId: "nop-bao-cao",
+    storageBucket: "nop-bao-cao.firebasestorage.app",
+    messagingSenderId: "290636152534",
+    appId: "1:290636152534:web:025db693275608522e1377"
+  },
   adminEmails: ["bn.nguyenbinhnguyen@gmail.com"], // giảng viên chấm bài (sửa cả trong firestore.rules và storage.rules)
   totalReports: 8,
   maxFileMB: 20,
@@ -501,6 +501,7 @@ const Demo = {
   allGrades() { return { ...this.read().grades }; },
   async getText(id) { return this.read().texts[id] || ""; },
   async getPdf(sub) { const b = await this.getFile(sub.id); if (!b) throw new Error("Không tìm thấy file trên trình duyệt này."); return b; },
+  async getUrl(sub) { return URL.createObjectURL(await this.getPdf(sub)); },
   async saveGrade(id, g) { this.read().grades[id] = g; this.write(); },
   async reopen(sub) { const db = this.read(); delete db.subs[sub.id]; delete db.texts[sub.id]; delete db.grades[sub.id]; await this.delFile(sub.id); this.write(); },
   async signIn() { setRole("admin", "chế độ thử"); }, async signOut() { setRole(null, null); }
@@ -556,9 +557,19 @@ const FB = {
   allSubs() { return this.cache.subs; },
   allGrades() { return this.cache.grades; },
   async getText(id) { const s = await this.fs.collection("texts").doc(id).get(); return s.exists ? s.data().text : ""; },
+  // Đường dẫn xem file: mở trực tiếp được, không cần CORS
+  async getUrl(sub) {
+    try { return await this.st.ref(sub.path).getDownloadURL(); }
+    catch (e) { throw new Error(`Không lấy được file trên Storage (${e.code || e.message}).`); }
+  },
+  // Tải nội dung file (để Claude chấm, gom zip): cần CORS
   async getPdf(sub) {
-    try { return await this.st.ref(sub.path).getBlob(); }
-    catch (e) { throw new Error("Không tải được file PDF. Nếu lần đầu dùng, cần cài CORS cho Storage (xem hướng dẫn)."); }
+    const url = await this.getUrl(sub);
+    let r;
+    try { r = await fetch(url); }
+    catch (e) { throw new Error("Trình duyệt chặn tải file về: chưa cài CORS cho Storage (bước 5 trong hướng dẫn)."); }
+    if (!r.ok) throw new Error(`Không tải được file (mã ${r.status}).`);
+    return await r.blob();
   },
   async saveGrade(id, g) { await this.fs.collection("grades").doc(id).set(g); },
   async reopen(sub) {
@@ -852,7 +863,7 @@ async function openGrade(id) {
   ["gC", "gP"].forEach(k => $(k).addEventListener("input", () => { by = "GV"; calc(); }));
   $("gBp").onclick = () => { bonus++; calc(); }; $("gBm").onclick = () => { bonus = Math.max(0, bonus - 1); calc(); };
   calc();
-  store.getPdf(s).then(b => { openGrade.url = URL.createObjectURL(b); $("gPdf").innerHTML = `<iframe src="${openGrade.url}" title="Bài của ${esc(s.name)}"></iframe><div class="msg" style="padding:8px 12px"><a href="${openGrade.url}" target="_blank" rel="noopener">Mở file trong tab mới</a></div>`; })
+  store.getUrl(s).then(u => { if (u.startsWith("blob:")) openGrade.url = u; $("gPdf").innerHTML = `<iframe src="${esc(u)}" title="Bài của ${esc(s.name)}"></iframe><div class="msg" style="padding:8px 12px"><a href="${esc(u)}" target="_blank" rel="noopener">Mở file trong tab mới</a></div>`; })
     .catch(e => { $("gPdf").innerHTML = `<div class="msg">${esc(e.message)}</div>`; });
   (state.texts[id] != null ? Promise.resolve(state.texts[id]) : store.getText(id)).then(t => { state.texts[id] = t; $("gTxt").textContent = t || "(trống)"; }).catch(() => $("gTxt").textContent = "Không tải được.");
   $("gClaude").onclick = async () => {
@@ -989,3 +1000,5 @@ renderStudentStatic();
 })();
 setInterval(() => { renderStudentStatic(); }, 5 * 60000);
 </script>
+</body>
+</html>
