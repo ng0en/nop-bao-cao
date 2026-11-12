@@ -445,7 +445,7 @@ function makePdf(lines) {
 
 /* ---------- lưu trữ: chế độ thử ---------- */
 const Demo = {
-  key: "nopbai-demo-v2", mem: null, files: new Map(), subs: [], idb: null,
+  key: "nopbai-demo-v3", mem: null, files: new Map(), subs: [], idb: null,
   read() { if (!this.mem) { try { this.mem = JSON.parse(localStorage.getItem(this.key)); } catch (e) {} } return this.mem; },
   write() { try { localStorage.setItem(this.key, JSON.stringify(this.mem)); } catch (e) {} this.emit(); },
   emit() { this.subs.forEach(f => f()); },
@@ -466,7 +466,7 @@ const Demo = {
   async delFile(id) { this.files.delete(id); if (this.idb) try { this.idb.transaction("pdf", "readwrite").objectStore("pdf").delete(id); } catch (e) {} },
   async init() {
     await this.openIdb();
-    if (!this.read()) { this.mem = { settings: DEFAULT_SETTINGS(), roster: {}, subs: {}, texts: {}, grades: {} }; await this.seed(); this.write(); }
+    if (!this.read()) { this.mem = { settings: DEFAULT_SETTINGS(), roster: {}, subs: {}, texts: {}, grades: {}, bonus: {} }; await this.seed(); this.write(); }
     window.addEventListener("storage", e => { if (e.key === this.key) { this.mem = null; this.emit(); } });
   },
   async seed() {
@@ -490,7 +490,8 @@ const Demo = {
     await add("2", 1, d1 - 5 * HOUR, B, "4601104004");
     await add("3", 1, d1 + 36 * HOUR, C, "4601104005");
     await add("1", 2, s.weeks[1].deadline - 2 * DAY, ["BAO CAO BAI 2 - NHOM (vi du)", "Hien tuong: nhom tan trong dung dich NaOH, co khi thoat ra.", "2Al + 2NaOH + 6H2O -> 2Na[Al(OH)4] + 3H2"], "4601104002");
-    this.mem.grades[subId("1", 1)] = { content: 6.25, present: 2.5, bonus: { "4601104001": 2 }, comment: "Giải thích đúng, thiếu điều kiện đun nóng ở thí nghiệm 2. (ví dụ)", by: "GV", at: Date.now() };
+    this.mem.bonus = { "01": { "4601104001": 2 }, "03": { "4601104003": 1 } };
+    this.mem.grades[subId("1", 1)] = { content: 6.25, present: 2.5, comment: "Giải thích đúng, thiếu điều kiện đun nóng ở thí nghiệm 2. (ví dụ)", by: "GV", at: Date.now() };
   },
   subscribe(f) { this.subs.push(f); f(); },
   async getSettings() { return this.read().settings; },
@@ -510,6 +511,8 @@ const Demo = {
   },
   allSubs() { return Object.entries(this.read().subs).map(([id, s]) => ({ id, ...s })); },
   allGrades() { return { ...this.read().grades }; },
+  allBonus() { return this.read().bonus || {}; },
+  async setBonus(wk, mssv, n) { const db = this.read(); db.bonus = db.bonus || {}; db.bonus[wk] = { ...(db.bonus[wk] || {}), [mssv]: n }; this.write(); },
   async getText(id) { return this.read().texts[id] || ""; },
   async getPdf(sub) { const b = await this.getFile(sub.id); if (!b) throw new Error("Không tìm thấy file trên trình duyệt này."); return b; },
   async getUrl(sub) { return URL.createObjectURL(await this.getPdf(sub)); },
@@ -520,7 +523,7 @@ const Demo = {
 
 /* ---------- lưu trữ: Firebase ---------- */
 const FB = {
-  fs: null, auth: null, st: null, cache: { subs: [], grades: {} }, unsub: [],
+  fs: null, auth: null, st: null, cache: { subs: [], grades: {}, bonus: {} }, unsub: [],
   async init() {
     const v = "10.12.2", base = `https://www.gstatic.com/firebasejs/${v}/`;
     for (const f of ["firebase-app-compat.js", "firebase-firestore-compat.js", "firebase-auth-compat.js", "firebase-storage-compat.js"])
@@ -533,6 +536,7 @@ const FB = {
       if (!CONFIG.adminEmails.includes(u.email)) return setRole("none", u.email);
       this.unsub.push(this.fs.collection("submissions").onSnapshot(s => { this.cache.subs = s.docs.map(d => ({ id: d.id, ...d.data({ serverTimestamps: "estimate" }) })); this.emit(); }, e => toast("Không đọc được bài nộp: " + e.message)));
       this.unsub.push(this.fs.collection("grades").onSnapshot(s => { const g = {}; s.docs.forEach(d => g[d.id] = d.data()); this.cache.grades = g; this.emit(); }));
+      this.unsub.push(this.fs.collection("bonus").onSnapshot(s => { const b = {}; s.docs.forEach(d => b[d.id.replace(/^W/, "")] = d.data()); this.cache.bonus = b; this.emit(); }));
       setRole("admin", u.email);
     });
   },
@@ -573,6 +577,8 @@ const FB = {
   },
   allSubs() { return this.cache.subs; },
   allGrades() { return this.cache.grades; },
+  allBonus() { return this.cache.bonus; },
+  async setBonus(wk, mssv, n) { await this.fs.collection("bonus").doc("W" + wk).set({ [mssv]: n }, { merge: true }); },
   async getText(id) { const s = await this.fs.collection("texts").doc(id).get(); return s.exists ? s.data().text : ""; },
   // Đường dẫn xem file: mở trực tiếp được, không cần CORS
   async getUrl(sub) {
@@ -726,6 +732,14 @@ function groupsList() {
 }
 const membersOf = g => groupsList().map.get(g) || [];
 const bonusMap = g => (g && g.bonus && typeof g.bonus === "object") ? g.bonus : {};
+// Điểm cộng lưu riêng theo bài + MSSV (cộng được cả khi nhóm chưa nộp). Bản cũ lưu trong điểm của nhóm: vẫn đọc được.
+const weekBonus = w => (store.allBonus() || {})[wkStr(w)] || {};
+function bonusOf(w, mssv) {
+  const b = weekBonus(w); if (mssv in b) return b[mssv] || 0;
+  const s = store.allSubs().find(x => x.week === w && x.group && membersOf(x.group).some(m => m.mssv === mssv));
+  return s ? (bonusMap(gradesMap()[s.id])[mssv] || 0) : 0;
+}
+const withBonus = (w, grade, mem) => ({ ...(grade || {}), bonus: Object.fromEntries(mem.map(m => [m.mssv, bonusOf(w, m.mssv)])) });
 
 function renderTeacher() {
   if (!isAdmin()) return;
@@ -751,7 +765,7 @@ function renderWeek(w) {
 
   const rows = keys.map(g => {
     const mem = map.get(g), s = byG[g], n = Math.max(1, mem.length), d = s && dupIds.get(s.id);
-    const gr = s ? (G[s.id] || {}) : {}, sc = s ? scoreOf(s, gr, S) : null, bm = bonusMap(gr);
+    const gr = withBonus(w, s ? G[s.id] : null, mem), sc = s ? scoreOf(s, gr, S) : null, bm = gr.bonus;
     const head = `<td rowspan="${n}" class="grp"><b>Nhóm ${esc(g)}</b>${d ? `<br><span class="pill dup">Trùng ${d.map(x => `${esc(gname(x.id))} ${x.pct}%`).join(", ")}</span>` : ""}${s ? `<br><button class="btn sm" data-open="${s.id}" style="margin-top:6px">Chấm</button>` : ""}</td>`;
     const gcells = s
       ? `<td rowspan="${n}" class="gc mono small">${fmt(tsMs(s.submittedAt))}<br><span class="muted">${esc(given(s.byName))} nộp</span></td>
@@ -760,14 +774,11 @@ function renderWeek(w) {
          <td rowspan="${n}" class="gc num">${sc.graded ? num(sc.afterLate) : `<span class="muted">Chưa chấm</span>`}</td>`
       : `<td rowspan="${n}" colspan="5" class="gc muted">Chưa nộp</td>`;
     const A = st => `<td class="mono">${esc(st.mssv)}</td><td>${esc(st.name)}</td>`;
-    const B = st => s
-      ? `<td><span class="bon"><button data-bm="${s.id}" data-m="${esc(st.mssv)}" aria-label="Bớt 0,1 điểm cộng cho ${esc(st.name)}">−</button><span class="mono">${num((bm[st.mssv] || 0) / 10, 1)}</span><button data-bp="${s.id}" data-m="${esc(st.mssv)}" aria-label="Cộng 0,1 điểm cho ${esc(st.name)}">+0,1</button></span></td>
-         <td class="num score">${sc.graded ? num(scoreOf(s, gr, S, st.mssv).total) : "—"}</td>`
-      : `<td></td><td class="num muted">—</td>`;
+    const B = st => bonusCell(w, st, bm[st.mssv]) + `<td class="num score">${s && sc.graded ? num(scoreOf(s, gr, S, st.mssv).total) : "—"}</td>`;
     const cls = i => `${i === 0 ? "gstart " : ""}${d ? "dup " : ""}${s ? "" : "none"}`;
     if (!mem.length) return `<tr class="${cls(0)}">${head}<td colspan="2" class="muted">Không còn thành viên trong danh sách</td>${gcells}<td></td><td></td></tr>`;
     return mem.map((st, i) => `<tr class="${cls(i)}">${i === 0 ? head : ""}${A(st)}${i === 0 ? gcells : ""}${B(st)}</tr>`).join("");
-  }).join("") + none.map((st, i) => `<tr class="${i === 0 ? "gstart " : ""}none">${i === 0 ? `<td rowspan="${none.length}" class="grp"><b>Chưa xếp nhóm</b></td>` : ""}<td class="mono">${esc(st.mssv)}</td><td>${esc(st.name)}</td><td colspan="7">Thêm cột Nhóm cho bạn này trong Cài đặt</td></tr>`).join("");
+  }).join("") + none.map((st, i) => `<tr class="${i === 0 ? "gstart " : ""}none">${i === 0 ? `<td rowspan="${none.length}" class="grp"><b>Chưa xếp nhóm</b></td>` : ""}<td class="mono">${esc(st.mssv)}</td><td>${esc(st.name)}</td><td colspan="5">Thêm cột Nhóm cho bạn này trong Cài đặt</td>${bonusCell(w, st, bonusOf(w, st.mssv))}<td class="num">—</td></tr>`).join("");
 
   $("tBody").innerHTML = `
     <div class="stats"><span>${esc(wk.title)}</span><span>Hạn <b>${wk.deadline ? fmtFull(wk.deadline) : "chưa đặt"}</b></span><span>Đã nộp <b>${subs.length}/${keys.length}</b> nhóm</span><span>Trễ <b>${late.length}</b></span><span>Đã chấm <b>${graded.length}</b></span>${avg != null ? `<span>Điểm nhóm TB <b>${num(avg)}</b></span>` : ""}</div>
@@ -781,10 +792,10 @@ function renderWeek(w) {
     ${orphans.length ? `<div class="banner">Có ${orphans.length} bài nộp thử từ phiên bản cũ (chưa theo nhóm): ${orphans.map(o => esc(o.name || o.mssv || o.id)).join(", ")}. <button class="btn sm" id="tOrphan">Xoá các bài này</button></div>` : ""}
     <div id="tReport"></div>
     <div class="scroll"><table class="t"><thead><tr><th>Nhóm</th><th>MSSV</th><th>Họ tên</th><th>Nộp lúc</th><th>Hạn</th><th class="num">Nội dung /7</th><th class="num">Trình bày /3</th><th class="num">Điểm nhóm</th><th>Điểm cộng</th><th class="num">Điểm</th></tr></thead><tbody>${rows || `<tr><td colspan="10" class="muted">Chưa có danh sách sinh viên. Dán danh sách (có cột Nhóm) ở phần Cài đặt bên dưới.</td></tr>`}</tbody></table></div>
-    <p class="muted small">Điểm nhóm = (Nội dung + Trình bày) × (1 − % trễ), chung cho cả nhóm. Điểm của mỗi bạn = điểm nhóm + điểm cộng riêng${S.cap ? ", tối đa 10" : ""}. Nhóm tô đậm đỏ là bài có nội dung giải thích gần giống bài nhóm khác (đã bỏ phương trình phản ứng và hình ảnh).</p>`;
+    <p class="muted small">Điểm nhóm = (Nội dung + Trình bày) × (1 − % trễ), chung cho cả nhóm. Điểm của mỗi bạn = điểm nhóm + điểm cộng riêng${S.cap ? ", tối đa 10" : ""}. Bấm +0,1 lúc nào cũng được, kể cả khi nhóm chưa nộp; điểm cộng tự lưu ngay. Nhóm tô đậm đỏ là bài có nội dung giải thích gần giống bài nhóm khác (đã bỏ phương trình phản ứng và hình ảnh).</p>`;
   renderReport(w);
   $("tBody").querySelectorAll("[data-open]").forEach(b => b.onclick = () => openGrade(b.dataset.open));
-  $("tBody").querySelectorAll("[data-bp],[data-bm]").forEach(b => b.onclick = () => bumpBonus(b.dataset.bp || b.dataset.bm, b.dataset.m, b.dataset.bp ? 1 : -1));
+  $("tBody").querySelectorAll("[data-bp],[data-bm]").forEach(b => b.onclick = () => bumpBonus(w, b.dataset.m, b.dataset.bp ? 1 : -1));
   $("tGradeAll").onclick = () => gradeAll(w);
   $("tDup").onclick = () => checkDup(w, true);
   $("tZip").onclick = () => downloadZip([w]);
@@ -798,7 +809,7 @@ function renderReport(w) {
   const S = state.settings, G = gradesMap(), subs = subsOf(w), gn = id => "Nhóm " + ((subs.find(s => s.id === id) || {}).group || "?");
   let h = `<div class="report">`;
   if (rep) {
-    h += `<h3>Kết quả chấm ${esc(S.weeks[w - 1].title)}</h3><ul>` + rep.ids.map(id => { const s = subs.find(x => x.id === id); if (!s) return ""; const g = G[id] || {}, sc = scoreOf(s, g, S), bm = bonusMap(g);
+    h += `<h3>Kết quả chấm ${esc(S.weeks[w - 1].title)}</h3><ul>` + rep.ids.map(id => { const s = subs.find(x => x.id === id); if (!s) return ""; const g = withBonus(w, G[id], membersOf(s.group)), sc = scoreOf(s, g, S), bm = g.bonus;
       const mem = membersOf(s.group);
       return `<li><b>Nhóm ${esc(s.group)}</b>: ${sc.graded
         ? `điểm nhóm <b class="mono">${num(sc.afterLate)}</b> (nội dung ${num(g.content)}, trình bày ${num(g.present)}${sc.pct ? `, trễ −${sc.pct}%` : ""}) · ${mem.map(m => `${esc(given(m.name))} <span class="mono">${num(scoreOf(s, g, S, m.mssv).total)}</span>${bm[m.mssv] ? ` (+${num(bm[m.mssv] / 10, 1)})` : ""}`).join(", ")}`
@@ -811,11 +822,12 @@ function renderReport(w) {
   el.innerHTML = h + `</div>`;
 }
 
-async function bumpBonus(id, mssv, d) {
-  const g = { ...(gradesMap()[id] || {}) }, b = { ...bonusMap(g) };
-  b[mssv] = Math.max(0, (b[mssv] || 0) + d); if (!b[mssv]) delete b[mssv];
-  g.bonus = b; g.at = Date.now(); g.by = g.by || "";
-  try { await store.saveGrade(id, g); } catch (e) { toast("Không lưu được: " + e.message); }
+function bonusCell(w, st, n) {
+  return `<td><span class="bon"><button data-bm="1" data-m="${esc(st.mssv)}" aria-label="Bớt 0,1 điểm cộng cho ${esc(st.name)}">−</button><span class="mono">${num((n || 0) / 10, 1)}</span><button data-bp="1" data-m="${esc(st.mssv)}" aria-label="Cộng 0,1 điểm cho ${esc(st.name)}">+0,1</button></span></td>`;
+}
+async function bumpBonus(w, mssv, d) {
+  try { await store.setBonus(wkStr(w), mssv, Math.max(0, bonusOf(w, mssv) + d)); }
+  catch (e) { toast("Không lưu được điểm cộng: " + e.message); }
 }
 
 async function checkDup(w, announce) {
@@ -900,7 +912,7 @@ async function openGrade(id) {
         <div class="actions" style="justify-content:space-between"><button class="btn danger" id="gReopen">Cho nhóm nộp lại</button><span class="row"><button class="btn" data-close>Đóng</button><button class="btn primary" id="gSave">Lưu điểm</button></span></div>
       </div>
     </div>`);
-  const bonus = { ...bonusMap(g) }; let by = g.by || "GV";
+  const bonus = { ...withBonus(s.week, g, mem).bonus }, bonus0 = { ...bonus }; let by = g.by || "GV";
   const calc = () => {
     const cur = { content: parseFloat($("gC").value), present: parseFloat($("gP").value), bonus };
     const sc = scoreOf(s, cur, S);
@@ -924,7 +936,11 @@ async function openGrade(id) {
   $("gSave").onclick = async () => {
     const c = parseFloat($("gC").value), p = parseFloat($("gP").value);
     if (!(c >= 0 && c <= 7) || !(p >= 0 && p <= 3)) { $("gErr").textContent = "Nội dung từ 0 đến 7, trình bày từ 0 đến 3."; return; }
-    try { await store.saveGrade(id, { content: c, present: p, bonus, comment: $("gN").value.trim(), by, at: Date.now() }); closeModal(); toast(`Đã lưu: Nhóm ${s.group} được ${num(scoreOf(s, { content: c, present: p }, S).afterLate)} điểm nhóm.`); }
+    try {
+      const old = gradesMap()[id] || {};
+      await store.saveGrade(id, { content: c, present: p, bonus: bonusMap(old), comment: $("gN").value.trim(), by, at: Date.now() });
+      for (const m of mem) if ((bonus[m.mssv] || 0) !== (bonus0[m.mssv] || 0)) await store.setBonus(wkStr(s.week), m.mssv, bonus[m.mssv] || 0);
+      closeModal(); toast(`Đã lưu: Nhóm ${s.group} được ${num(scoreOf(s, { content: c, present: p }, S).afterLate)} điểm nhóm.`); }
     catch (e) { $("gErr").textContent = "Không lưu được: " + e.message; }
   };
   $("gReopen").onclick = async () => {
@@ -973,9 +989,13 @@ function summaryRows() {
   const S = state.settings, G = gradesMap(), subs = store.allSubs().filter(s => s.group);
   const { keys, map, none } = groupsList();
   return [...keys.flatMap(g => map.get(g)), ...none].map(st => {
-    const cells = Array.from({ length: N }, (_, i) => { const s = st.group && subs.find(x => x.group === st.group && x.week === i + 1); if (!s) return null; const sc = scoreOf(s, G[s.id], S, st.mssv); return sc.graded ? sc.total : "chưa chấm"; });
-    const nums = cells.map(c => typeof c === "number" ? c : 0);
-    return { st, cells, avg: nums.reduce((a, b) => a + b, 0) / N, count: cells.filter(c => c != null).length };
+    // mỗi ô: graded = đã chấm; wait = đã nộp chưa chấm; bonus = chưa nộp nhưng có điểm cộng; none = chưa nộp
+    const cells = Array.from({ length: N }, (_, i) => {
+      const w = i + 1, b = bonusOf(w, st.mssv) / 10, s = st.group && subs.find(x => x.group === st.group && x.week === w);
+      if (s) { const sc = scoreOf(s, withBonus(w, G[s.id], [st]), S, st.mssv); return sc.graded ? { k: "graded", v: sc.total } : { k: "wait", v: b, b }; }
+      return b ? { k: "bonus", v: b, b } : { k: "none", v: 0 };
+    });
+    return { st, cells, avg: cells.reduce((a, c) => a + c.v, 0) / N, count: cells.filter(c => c.k === "graded" || c.k === "wait").length };
   });
 }
 function renderSummary() {
@@ -983,12 +1003,12 @@ function renderSummary() {
   $("tBody").innerHTML = `
     <div class="toolbar"><button class="btn primary" id="sCsv">Tải bảng điểm (CSV, mở bằng Excel)</button><button class="btn" id="sCopy">Sao chép bảng</button><button class="btn" id="sZipAll">Tải toàn bộ bài (.zip)</button><span class="progress muted" id="tProg"></span></div>
     <div class="scroll"><table class="t"><thead><tr><th class="num">#</th><th>Nhóm</th><th>MSSV</th><th>Họ tên</th>${Array.from({ length: N }, (_, i) => `<th class="num">B${i + 1}</th>`).join("")}<th class="num">Đã nộp</th><th class="num">TB ${N} bài</th></tr></thead><tbody>
-    ${rows.map((r, i) => `<tr class="${i && rows[i - 1].st.group !== r.st.group ? "gstart" : ""}"><td class="num">${i + 1}</td><td>${esc(r.st.group || "—")}</td><td class="mono">${esc(r.st.mssv)}</td><td>${esc(r.st.name)}</td>${r.cells.map(c => `<td class="num">${c == null ? `<span class="muted">—</span>` : typeof c === "number" ? num(c) : `<span class="muted small">chưa chấm</span>`}</td>`).join("")}<td class="num">${r.count}/${N}</td><td class="num score">${num(r.avg)}</td></tr>`).join("")}
+    ${rows.map((r, i) => `<tr class="${i && rows[i - 1].st.group !== r.st.group ? "gstart" : ""}"><td class="num">${i + 1}</td><td>${esc(r.st.group || "—")}</td><td class="mono">${esc(r.st.mssv)}</td><td>${esc(r.st.name)}</td>${r.cells.map(c => `<td class="num">${c.k === "graded" ? num(c.v) : c.k === "wait" ? `<span class="muted small">chưa chấm${c.b ? " +" + num(c.b, 1) : ""}</span>` : c.k === "bonus" ? `<span title="Chưa nộp, chỉ có điểm cộng">${num(c.v, 1)}*</span>` : `<span class="muted">—</span>`}</td>`).join("")}<td class="num">${r.count}/${N}</td><td class="num score">${num(r.avg)}</td></tr>`).join("")}
     </tbody></table></div>
-    <p class="muted small">Điểm từng bài đã gồm điểm cộng riêng. Bài chưa nộp hoặc chưa chấm tính 0 điểm khi lấy trung bình ${N} bài.</p>`;
+    <p class="muted small">Điểm từng bài đã gồm điểm cộng riêng. Dấu * là bài nhóm chưa nộp nhưng bạn đó có điểm cộng. Khi lấy trung bình ${N} bài, bài chưa nộp hoặc chưa chấm chỉ tính điểm cộng (nếu có).</p>`;
   const text = sep => { const q = v => sep === "," ? `"${String(v).replace(/"/g, '""')}"` : String(v);
     return [["STT", "Nhóm", "MSSV", "Họ tên", ...Array.from({ length: N }, (_, i) => "Bài " + (i + 1)), "Đã nộp", "TB"].map(q).join(sep),
-      ...rows.map((r, i) => [i + 1, r.st.group || "", r.st.mssv, r.st.name, ...r.cells.map(c => c == null ? "" : typeof c === "number" ? num(c) : "chưa chấm"), r.count, num(r.avg)].map(q).join(sep))].join("\n"); };
+      ...rows.map((r, i) => [i + 1, r.st.group || "", r.st.mssv, r.st.name, ...r.cells.map(c => c.k === "graded" ? num(c.v) : c.k === "wait" ? "chưa chấm" + (c.b ? " +" + num(c.b, 1) : "") : c.k === "bonus" ? num(c.v, 1) : ""), r.count, num(r.avg)].map(q).join(sep))].join("\n"); };
   $("sCsv").onclick = () => saveBlob(new Blob(["﻿" + text(",")], { type: "text/csv;charset=utf-8" }), "bang-diem-bao-cao.csv");
   $("sCopy").onclick = () => navigator.clipboard.writeText(text("\t")).then(() => toast("Đã sao chép. Dán vào Excel."), () => toast("Trình duyệt chặn sao chép. Hãy dùng nút Tải CSV."));
   $("sZipAll").onclick = () => downloadZip(Array.from({ length: N }, (_, i) => i + 1));
